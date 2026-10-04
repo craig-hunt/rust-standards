@@ -37,5 +37,12 @@ jobs:
       # three different ways. The image build is cached by the runner's Docker,
       # and running the same script CI and a developer both run means neither can
       # pass a check the other does not make.
+      #
+      # Invoked through bash rather than as a program, and not as a matter of
+      # taste: this repository is developed on a filesystem that cannot record an
+      # executable bit, so git stores these scripts mode 644 and a checkout that
+      # runs one directly exits 126 before a single gate has run. Naming the
+      # interpreter removes a class of failure that has nothing to do with the
+      # code under test.
       - name: Every gate
-        run: ./scripts/verify-in-docker.sh
+        run: bash ./scripts/verify-in-docker.sh

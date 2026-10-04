@@ -27,14 +27,14 @@ service refuses to start without one.
 Every gate, in one command:
 
 ```
-./scripts/verify.sh
+bash ./scripts/verify.sh
 ```
 
 That needs the toolchain in `rust-toolchain.toml`, plus `cargo-mutants`,
 `cargo-deny` and `gitleaks`. On a machine without them:
 
 ```
-./scripts/verify-in-docker.sh
+bash ./scripts/verify-in-docker.sh
 ```
 
 which builds `scripts/toolchain.Dockerfile`, pinning every tool by digest, and
@@ -44,12 +44,19 @@ The checks that need a database and a socket run beside it, because a gate that
 starts containers from inside one would need the daemon socket mounted into it:
 
 ```
-./scripts/smoke.sh
+bash ./scripts/smoke.sh
 ```
 
 It brings the stack up on ports it will not fight anybody for, drives the API,
 asserts the event round trip through the `jsonb` column and the relay's handling
 of a message it cannot deliver, and tears the stack down again.
+
+Every one of them names `bash` rather than running as a program, and that is
+deliberate. This repository is developed on a filesystem that cannot record an
+executable bit, so git stores these scripts mode 644; a checkout that executes
+one directly exits 126 before a single gate has run, which is what CI did twice.
+A gate that depends on a file attribute the working environment cannot represent
+is a gate that fails for a reason unrelated to the code under test.
 
 ## The standards
 

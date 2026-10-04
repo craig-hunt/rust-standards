@@ -26,9 +26,14 @@ docker build \
   --tag "${TOOLCHAIN_IMAGE}" \
   "${REPOSITORY_ROOT}" > /dev/null
 
+# bash rather than the script as a program, for the same reason the workflow
+# names it: the repository is developed where an executable bit cannot be
+# recorded, so git stores these scripts mode 644 and a checkout that executes one
+# directly exits 126 before any gate runs. The interpreter is named here too,
+# because the mount inside the container carries whatever mode the checkout had.
 exec docker run --rm \
   --volume "${REPOSITORY_ROOT}:/work" \
   --workdir /work \
   --volume "${REGISTRY_CACHE}:/usr/local/cargo/registry" \
   "${TOOLCHAIN_IMAGE}" \
-  ./scripts/verify.sh
+  bash ./scripts/verify.sh
