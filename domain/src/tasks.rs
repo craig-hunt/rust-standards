@@ -344,8 +344,8 @@ mod tests {
 
     fn three_tasks() -> Vec<TaskItem> {
         vec![
-            task(1, FIRST, false),
-            task(2, SECOND, true),
+            task(FIRST_VALID_ID, FIRST, false),
+            task(SECOND_ID, SECOND, true),
             task(THIRD_ID, THIRD, false),
         ]
     }

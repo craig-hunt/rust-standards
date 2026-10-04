@@ -21,21 +21,25 @@ mod tests {
     const EMOJI: &str = "\u{1F600}";
     const LATIN: &str = "ab";
 
+    const BYTES_IN_THE_ACCENTED_LETTER: usize = 2;
+    const BYTES_IN_THE_EMOJI: usize = 4;
+    const CHARACTERS_IN_THE_LATIN_PAIR: usize = 2;
+
     #[test]
     fn counts_a_multibyte_character_once() {
-        assert_eq!(ACCENTED.len(), 2, "two bytes");
+        assert_eq!(ACCENTED.len(), BYTES_IN_THE_ACCENTED_LETTER);
         assert_eq!(count_characters(ACCENTED), 1, "one character");
     }
 
     #[test]
     fn counts_a_character_outside_the_basic_plane_once() {
-        assert_eq!(EMOJI.len(), 4, "four bytes");
+        assert_eq!(EMOJI.len(), BYTES_IN_THE_EMOJI);
         assert_eq!(count_characters(EMOJI), 1, "one character");
     }
 
     #[test]
     fn counts_each_latin_character_once() {
-        assert_eq!(count_characters(LATIN), 2);
+        assert_eq!(count_characters(LATIN), CHARACTERS_IN_THE_LATIN_PAIR);
     }
 
     #[test]

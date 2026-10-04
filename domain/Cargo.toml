@@ -1,4 +1,4 @@
-# The innermost crate, depending on one thing and that one thing a derive macro.
+# The innermost crate, depending on a derive macro and an identifier type.
 #
 # It has no runtime, no client, no clock. A domain that can reach a database is
 # a domain whose rules a test cannot pin down, and the dependency list is the

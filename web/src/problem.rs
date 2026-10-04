@@ -110,6 +110,9 @@ pub enum Failure {
     /// A dependency is not answering.
     #[error("{}", crate::constants::messages::NOT_READY)]
     NotReady,
+    /// Every store worker is occupied and the queue wait ran out.
+    #[error("{}", crate::constants::messages::BUSY)]
+    Busy,
 }
 
 impl Failure {
@@ -171,6 +174,14 @@ impl Failure {
                 titles::UNAVAILABLE,
                 domain::health::constants::STATUS_UNAVAILABLE,
                 crate::constants::messages::NOT_READY,
+            ),
+            // 503 rather than 500: nothing is broken, the service is full, and
+            // the status tells a client that retrying is worth something.
+            Self::Busy => Problem::of(
+                StatusCode::SERVICE_UNAVAILABLE,
+                titles::UNAVAILABLE,
+                codes::BUSY,
+                crate::constants::messages::BUSY,
             ),
         }
     }

@@ -5,10 +5,11 @@
 //! them by pattern, which is the same guarantee enforced by the compiler rather
 //! than by a convention about sentinel values.
 //!
-//! Nothing here boxes an error. A boxed error is a failure a caller can only
-//! print, and the edge needs to pick a status from it. `anyhow` appears exactly
-//! once, at the process boundary in the `web` crate, where printing really is
-//! all that is left to do.
+//! Nothing here boxes an error, and nothing in the repository does. A boxed
+//! error is a failure a caller can only print, and every caller of these needs
+//! to pick a status from one instead. A process boundary that only prints could
+//! justify a boxed error, so the exemption the README states is written as a
+//! condition rather than as a crate this repository actually carries.
 
 use std::collections::BTreeMap;
 
@@ -228,7 +229,7 @@ mod tests {
 
         assert_eq!(
             keys,
-            vec!["alpha", "zulu"],
+            vec![EARLY_IN_THE_ALPHABET, LATE_IN_THE_ALPHABET],
             "insertion order does not reach the wire"
         );
     }

@@ -7,6 +7,7 @@
 //! hides.
 
 use crate::constants::{POOL_SIZE, RELAY_INTERVAL_SECONDS, headers, paths};
+use crate::offload::Offload;
 use crate::problem::Failure;
 use crate::responses::{self, Body};
 use crate::routing::{self, Surface};
@@ -38,10 +39,17 @@ use tokio::net::TcpListener;
 /// every task needs the same stores. Cloning the handle is a reference count;
 /// cloning the stores would open a second pool.
 pub struct Api {
-    tasks: TaskService<PostgresTaskStore<SystemClock>>,
-    signups: SignupService<PostgresSignupStore<SystemClock>>,
-    inventory: InventoryService<PostgresInventoryStore>,
-    readiness: HealthService<PostgresHealthProbe>,
+    tasks: Arc<TaskService<PostgresTaskStore<SystemClock>>>,
+    signups: Arc<SignupService<PostgresSignupStore<SystemClock>>>,
+    inventory: Arc<InventoryService<PostgresInventoryStore>>,
+    readiness: Arc<HealthService>,
+    /// The bounded pool every store call runs on.
+    ///
+    /// One per service, because a pool built per request bounds nothing. Each
+    /// service is behind its own `Arc` as well: the blocking pool needs an owned
+    /// handle to move into a task, and a reference borrowed from this struct
+    /// cannot outlive the call that borrowed it.
+    offload: Offload,
     token: String,
 }
 
@@ -56,10 +64,19 @@ impl Api {
         let clock = SystemClock;
 
         Ok(Self {
-            tasks: TaskService::new(PostgresTaskStore::new(pool.clone(), clock)),
-            signups: SignupService::new(PostgresSignupStore::new(pool.clone(), clock)),
-            inventory: InventoryService::new(PostgresInventoryStore::new(pool.clone())),
-            readiness: HealthService::new(PostgresHealthProbe::new(pool)),
+            tasks: Arc::new(TaskService::new(PostgresTaskStore::new(
+                pool.clone(),
+                clock,
+            ))),
+            signups: Arc::new(SignupService::new(PostgresSignupStore::new(
+                pool.clone(),
+                clock,
+            ))),
+            inventory: Arc::new(InventoryService::new(PostgresInventoryStore::new(
+                pool.clone(),
+            ))),
+            readiness: Arc::new(HealthService::new(PostgresHealthProbe::new(pool))),
+            offload: Offload::new(),
             token: settings.api_token.clone(),
         })
     }
@@ -77,10 +94,12 @@ impl Api {
         }
 
         match surface {
-            Surface::Health => endpoints::health(&self.readiness, &request),
-            Surface::Tasks => endpoints::tasks(&self.tasks, request).await,
-            Surface::Signups => endpoints::signups(&self.signups, request).await,
-            Surface::Inventory => endpoints::inventory(&self.inventory, &request),
+            Surface::Health => endpoints::health(&self.readiness, &request).await,
+            Surface::Tasks => endpoints::tasks(&self.tasks, &self.offload, request).await,
+            Surface::Signups => endpoints::signups(&self.signups, &self.offload, request).await,
+            Surface::Inventory => {
+                endpoints::inventory(&self.inventory, &self.offload, &request).await
+            }
         }
     }
 

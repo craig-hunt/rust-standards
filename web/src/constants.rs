@@ -95,6 +95,8 @@ pub mod codes {
     pub const NOT_FOUND: &str = "not_found";
     /// That path does not answer that method.
     pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    /// Every store worker is busy and the queue wait ran out.
+    pub const BUSY: &str = "busy";
 }
 
 /// The sentences this layer writes.
@@ -107,6 +109,10 @@ pub mod messages {
     pub const METHOD_NOT_ALLOWED: &str = "that path does not answer that method";
     /// Detail a readiness probe receives.
     pub const NOT_READY: &str = "readiness check failed";
+    /// Detail for [`codes::BUSY`].
+    pub const BUSY: &str = "the service is at capacity, so this request was not started";
+    /// What the log says when a blocking store task did not come back.
+    pub const STORE_WORKER_LOST: &str = "a store call did not return from the blocking pool";
 }
 
 /// The environment variables this service reads.
@@ -130,6 +136,38 @@ pub const MAX_REQUEST_ID_LENGTH: usize = 64;
 
 /// How many connections the pool keeps.
 pub const POOL_SIZE: u32 = 8;
+
+/// How many store calls may occupy the blocking pool at once.
+///
+/// The same number as the connection pool, and a test asserts the two agree. A
+/// ninth concurrent store call could not get a connection anyway, so admitting
+/// it would only move the wait from a queue this service can see into the pool's
+/// internal one, where nothing reports it.
+pub const STORE_WORKERS: usize = 8;
+
+/// How long a readiness probe may hold a blocking thread while it waits.
+///
+/// One, reserved. The probe's own work runs on a thread the application layer
+/// owns; this is the thread that sits waiting for its answer. Reserving it is
+/// what keeps a readiness check answerable while every store worker is busy,
+/// which is the difference between a platform seeing an overloaded instance and
+/// a platform seeing a dead one.
+pub const PROBE_WORKERS: usize = 1;
+
+/// How many blocking threads the runtime is allowed.
+///
+/// Stated rather than left at the default, because the default is five hundred
+/// and twelve: a bound that large is a bound in name only, and the point of
+/// moving blocking work off the runtime is to keep its cost countable.
+pub const BLOCKING_THREADS: usize = STORE_WORKERS + PROBE_WORKERS;
+
+/// How long a request waits for a store worker before the service refuses it.
+///
+/// A request that cannot start within a second during a spike is better refused
+/// than queued: the caller's own timeout is usually shorter than the queue it
+/// would join, so the work would complete for nobody while holding a connection
+/// that another request could have used.
+pub const STORE_QUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How often the relay drains the outbox.
 pub const RELAY_INTERVAL_SECONDS: u64 = 5;

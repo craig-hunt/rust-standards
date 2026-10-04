@@ -29,3 +29,10 @@ RUN rustup component add clippy rustfmt
 RUN cargo install --locked cargo-mutants@27.1.0 cargo-deny@0.20.2
 
 COPY --from=secrets /usr/bin/gitleaks /usr/local/bin/gitleaks
+
+# The repository arrives as a bind mount owned by the user outside the container,
+# which git refuses to read as root without being told so. The secrets gate reads
+# the history through git, and the refusal is quiet in the worst way: gitleaks
+# reports no leaks after scanning no commits, and exits zero. The gate carries its
+# own check for a history it could not read, and this removes the cause.
+RUN git config --global --add safe.directory /work

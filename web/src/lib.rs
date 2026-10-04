@@ -2,6 +2,7 @@
 
 pub mod constants;
 pub mod endpoints;
+pub mod offload;
 pub mod problem;
 pub mod requests;
 pub mod responses;

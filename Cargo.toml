@@ -63,7 +63,21 @@ tracing = "0.1.44"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "net", "macros", "signal"] }
+tokio = { version = "1.53.2", features = [
+  "rt-multi-thread",
+  "net",
+  "macros",
+  "signal",
+  "sync",
+  "time",
+] }
+
+# The token comparison. Hand-written constant-time code was the first version of
+# this and the review was right to refuse it: the loop reads as constant-time and
+# the compiler is under no obligation to keep it that way, so the guarantee lived
+# in a comment rather than in the artifact. This crate exists to carry that
+# guarantee, uses compiler barriers to hold it, and is what the ecosystem audits.
+subtle = "2.6.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 [workspace.lints.rust]

@@ -73,17 +73,18 @@ pub fn authorize<B>(request: &Request<B>, expected: &str) -> Result<(), Failure>
 
 /// Compares two byte strings without stopping at the first difference.
 ///
-/// Written out rather than taken from a crate, because it is six lines and a
-/// reader of a standards repository should be able to see what it does.
+/// This was a hand-written loop over the bytes, and the review was right to
+/// refuse it: nothing obliges a compiler to preserve what the loop was for. The
+/// accumulated difference stays non-zero after the first mismatch, so an
+/// optimizer may branch out early or lower the whole thing to `memcmp`, and the
+/// guarantee would live in the comment above it rather than in the artifact
+/// shipped. `subtle` exists to hold the guarantee through optimization, which is
+/// not something a reader can verify by reading six lines, however clear they
+/// are.
 fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
-    if presented.len() != expected.len() {
-        return false;
-    }
-    let mut difference = 0_u8;
-    for (left, right) in presented.iter().zip(expected.iter()) {
-        difference |= left ^ right;
-    }
-    difference == 0
+    use subtle::ConstantTimeEq;
+
+    presented.ct_eq(expected).into()
 }
 
 #[cfg(test)]

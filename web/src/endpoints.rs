@@ -6,9 +6,11 @@
 //! for a failure or to put internals in a body.
 
 use crate::constants::{methods, paths, query};
+use crate::offload::Offload;
 use crate::problem::Failure;
 use crate::requests::{self, Query};
 use crate::responses::{self, Answer, Body};
+use application::health::HealthService;
 use application::inventory::InventoryService;
 use application::ports::{InventoryStore, SignupStore, TaskStore};
 use application::signups::SignupService;
@@ -16,9 +18,10 @@ use application::tasks::TaskService;
 use domain::inventory::{InventoryQuery, InventoryResult};
 use domain::signups::{SignupConfirmation, SignupRequest, validate};
 use domain::tasks::{TaskFilter, TaskId, TaskItem, TaskTitle, TaskView, errors};
-use hyper::body::Incoming;
+use hyper::body::{Body as HttpBody, Buf};
 use hyper::{Request, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// What a client sends to create a task.
 #[derive(Debug, Deserialize)]
@@ -45,14 +48,26 @@ pub struct UpdateTask {
 /// wire names stay this layer's decision. They are the same names the domain
 /// keys its field problems by, and a test asserts that, because a form cannot
 /// place a message beside an input it cannot match.
+///
+/// Every member defaults, which is what makes those per-field problems
+/// reachable. A missing member used to fail inside serde, so an incomplete form
+/// answered `invalid_body` with no fields at all, and the route's promise to
+/// report every problem at once held only for a form that already carried every
+/// member. The domain is the thing that knows a name is required, and it cannot
+/// say so about a body that never reached it. Unknown members still fail,
+/// because a misspelled member is a different mistake from a missing one and
+/// ignoring it would leave a client with no way to find the typo.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateSignup {
     /// The name box.
+    #[serde(default)]
     pub full_name: String,
     /// The email box.
+    #[serde(default)]
     pub email: String,
     /// The plan list.
+    #[serde(default)]
     pub plan: String,
     /// The seats box, absent when left alone.
     pub seats: Option<i32>,
@@ -60,6 +75,7 @@ pub struct CreateSignup {
     #[serde(default)]
     pub notes: String,
     /// The terms box.
+    #[serde(default)]
     pub accept_terms: bool,
 }
 
@@ -215,31 +231,56 @@ fn task_id_from(path: &str) -> Result<TaskId, Failure> {
         .ok_or_else(|| Failure::from(errors::not_found()))
 }
 
+/// Whether a path addresses one task rather than the collection.
+///
+/// The wildcard arms of the task routes ask this instead of matching anything.
+/// `(PATCH, _)` sat below the collection arms and so matched `/api/tasks` too,
+/// which the handler then read as an identifier, failed to parse, and answered
+/// 404 for. The collection does not answer PATCH, and 405 with an `Allow` header
+/// is what tells a client that rather than implying the path was wrong.
+fn addresses_one_task(path: &str) -> bool {
+    path.starts_with(paths::TASKS_PREFIX)
+}
+
 /// The task routes.
 ///
 /// # Errors
 ///
 /// Returns whatever the domain or the store refused, mapped at the edge.
-pub async fn tasks<S: TaskStore>(service: &TaskService<S>, request: Request<Incoming>) -> Answer {
+pub async fn tasks<S, B>(
+    service: &Arc<TaskService<S>>,
+    offload: &Offload,
+    request: Request<B>,
+) -> Answer
+where
+    S: TaskStore + Send + Sync + 'static,
+    B: HttpBody,
+    B::Data: Buf,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
 
     match (method.as_str(), path.as_str()) {
         (methods::GET, paths::TASKS) => {
             let filter = TaskFilter::parse(Query::of(&request).get(query::FILTER))?;
-            let view = service.list(filter)?;
+            let reading = Arc::clone(service);
+            let view = offload.run(move || reading.list(filter)).await?;
             responses::json(StatusCode::OK, &TaskViewResponse::from(&view))
         }
         (methods::POST, paths::TASKS) => {
             let sent: CreateTask = requests::read_json(request).await?;
-            let created = service.create(&TaskTitle::new(&sent.title)?)?;
+            let title = TaskTitle::new(&sent.title)?;
+            let writing = Arc::clone(service);
+            let created = offload.run(move || writing.create(&title)).await?;
             responses::json(StatusCode::CREATED, &TaskResponse::from(&created))
         }
         (methods::DELETE, paths::TASKS) => {
-            let removed = service.clear_completed()?;
+            let clearing = Arc::clone(service);
+            let removed = offload.run(move || clearing.clear_completed()).await?;
             responses::json(StatusCode::OK, &ClearedTasks { removed })
         }
-        (methods::PATCH, _) => {
+        (methods::PATCH, item) if addresses_one_task(item) => {
             let id = task_id_from(&path)?;
             let sent: UpdateTask = requests::read_json(request).await?;
             let completed = sent.completed.ok_or_else(|| {
@@ -247,11 +288,16 @@ pub async fn tasks<S: TaskStore>(service: &TaskService<S>, request: Request<Inco
                     errors::completed_required(),
                 ))
             })?;
-            let updated = service.set_completed(id, completed)?;
+            let updating = Arc::clone(service);
+            let updated = offload
+                .run(move || updating.set_completed(id, completed))
+                .await?;
             responses::json(StatusCode::OK, &TaskResponse::from(&updated))
         }
-        (methods::DELETE, _) => {
-            service.delete(task_id_from(&path)?)?;
+        (methods::DELETE, item) if addresses_one_task(item) => {
+            let id = task_id_from(&path)?;
+            let deleting = Arc::clone(service);
+            offload.run(move || deleting.delete(id)).await?;
             responses::empty(StatusCode::NO_CONTENT)
         }
         _ => Err(Failure::MethodNotAllowed {
@@ -278,10 +324,17 @@ fn allowed_on(path: &str) -> String {
 ///
 /// Returns every field problem at once when the form is incomplete, so a client
 /// corrects them in one pass.
-pub async fn signups<S: SignupStore>(
-    service: &SignupService<S>,
-    request: Request<Incoming>,
-) -> Answer {
+pub async fn signups<S, B>(
+    service: &Arc<SignupService<S>>,
+    offload: &Offload,
+    request: Request<B>,
+) -> Answer
+where
+    S: SignupStore + Send + Sync + 'static,
+    B: HttpBody,
+    B::Data: Buf,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     const ALLOWED: &str = methods::POST;
 
     if request.method() != hyper::Method::POST {
@@ -292,7 +345,8 @@ pub async fn signups<S: SignupStore>(
 
     let sent: CreateSignup = requests::read_json(request).await?;
     let validated = validate(&SignupRequest::from(sent))?;
-    let confirmation = service.create(&validated)?;
+    let recording = Arc::clone(service);
+    let confirmation = offload.run(move || recording.create(&validated)).await?;
     responses::json(StatusCode::CREATED, &SignupResponse::from(&confirmation))
 }
 
@@ -302,10 +356,14 @@ pub async fn signups<S: SignupStore>(
 ///
 /// Returns a validation failure when the query names a column or an order the
 /// table does not publish.
-pub fn inventory<S: InventoryStore>(
-    service: &InventoryService<S>,
-    request: &Request<Incoming>,
-) -> Answer {
+pub async fn inventory<S, B>(
+    service: &Arc<InventoryService<S>>,
+    offload: &Offload,
+    request: &Request<B>,
+) -> Answer
+where
+    S: InventoryStore + Send + Sync + 'static,
+{
     const ALLOWED: &str = methods::GET;
 
     if request.method() != hyper::Method::GET {
@@ -320,7 +378,8 @@ pub fn inventory<S: InventoryStore>(
         parameters.get(query::SORT),
         parameters.get(query::DIRECTION),
     )?;
-    let answered = service.query(&asked)?;
+    let reading = Arc::clone(service);
+    let answered = offload.run(move || reading.query(&asked)).await?;
     responses::json(StatusCode::OK, &InventoryResponse::from(&answered))
 }
 
@@ -337,16 +396,22 @@ pub fn inventory<S: InventoryStore>(
 /// platform probe, which acts on the status and has no use for the reason; the
 /// operator needs the reason, and the log is where the operator looks.
 ///
+/// Both probes answer GET and nothing else. A probe path that answered a POST
+/// with the liveness body would tell a caller the service accepts writes there,
+/// and the guard is the same one every other route carries.
+///
 /// # Errors
 ///
 /// Returns [`Failure::NotReady`] when the dependency did not answer in time.
-pub fn health<P>(
-    readiness: &application::health::HealthService<P>,
-    request: &Request<Incoming>,
-) -> Answer
-where
-    P: application::ports::HealthProbe + Clone + Send + 'static,
-{
+pub async fn health<B>(readiness: &Arc<HealthService>, request: &Request<B>) -> Answer {
+    const ALLOWED: &str = methods::GET;
+
+    if request.method() != hyper::Method::GET {
+        return Err(Failure::MethodNotAllowed {
+            allowed: ALLOWED.to_owned(),
+        });
+    }
+
     let ready = HealthResponse {
         status: domain::health::constants::STATUS_OK,
     };
@@ -355,7 +420,14 @@ where
         return responses::json(StatusCode::OK, &ready);
     }
 
-    let outcome = readiness.check();
+    // The check waits on a channel, which is a blocking wait however short, so it
+    // happens on the blocking pool rather than on the worker polling this
+    // connection. The thread it occupies is the one `PROBE_WORKERS` reserves.
+    let asking = Arc::clone(readiness);
+    let outcome = tokio::task::spawn_blocking(move || asking.check())
+        .await
+        .map_err(|_| Failure::NotReady)?;
+
     if outcome.ready {
         return responses::json(StatusCode::OK, &ready);
     }
@@ -367,3 +439,179 @@ where
 
 /// The body type the routes answer with, re-exported so the service can name it.
 pub type ResponseBody = Body;
+
+#[cfg(test)]
+mod tests {
+    // A test asserts by panicking, so the lints that forbid a panic in a service
+    // have to be lifted here.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{health, signups, tasks};
+    use crate::constants::{headers, methods, paths};
+    use crate::offload::Offload;
+    use crate::problem::Failure;
+    use application::health::HealthService;
+    use application::ports::{SignupStore, StoreResult, TaskStore};
+    use application::signups::SignupService;
+    use application::tasks::TaskService;
+    use domain::signups::{Signup, SignupId};
+    use domain::tasks::{TaskId, TaskItem, TaskTitle};
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+    use hyper::{Method, Request, StatusCode};
+    use std::sync::Arc;
+
+    const ON_THE_COLLECTION: &str = "GET, POST, DELETE";
+    const ONE_TASK: &str = "/api/tasks/4";
+    const ASSIGNED_ID: i64 = 1;
+    const NO_BODY: &str = "";
+    const AN_EMPTY_FORM: &str = "{}";
+    const FORM_MEMBERS: usize = 4;
+    const EXPECTED_FIELDS: [&str; FORM_MEMBERS] = ["fullName", "email", "plan", "acceptTerms"];
+
+    struct NoTasks;
+
+    impl TaskStore for NoTasks {
+        fn list(&self) -> StoreResult<Vec<TaskItem>> {
+            Ok(Vec::new())
+        }
+
+        fn create(&self, _title: &TaskTitle) -> StoreResult<TaskItem> {
+            unreachable!("no test here reaches a write")
+        }
+
+        fn set_completed(&self, _id: TaskId, _completed: bool) -> StoreResult<TaskItem> {
+            unreachable!("no test here reaches a write")
+        }
+
+        fn delete(&self, _id: TaskId) -> StoreResult<()> {
+            unreachable!("no test here reaches a write")
+        }
+
+        fn delete_completed(&self) -> StoreResult<u64> {
+            unreachable!("no test here reaches a write")
+        }
+    }
+
+    struct AcceptingSignups;
+
+    impl SignupStore for AcceptingSignups {
+        fn save(&self, _signup: &Signup) -> StoreResult<SignupId> {
+            Ok(SignupId::new(ASSIGNED_ID)?)
+        }
+    }
+
+    struct Answering;
+
+    impl application::ports::HealthProbe for Answering {
+        fn ping(&self) -> StoreResult<()> {
+            Ok(())
+        }
+    }
+
+    fn addressed(method: &Method, path: &str, body: &str) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Full::new(Bytes::from(body.to_owned())))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn patching_the_collection_is_a_method_it_does_not_answer_rather_than_a_missing_task() {
+        let service = Arc::new(TaskService::new(NoTasks));
+
+        let refused = tasks(
+            &service,
+            &Offload::new(),
+            addressed(&Method::PATCH, paths::TASKS, NO_BODY),
+        )
+        .await
+        .unwrap_err();
+
+        match refused {
+            Failure::MethodNotAllowed { allowed } => assert_eq!(allowed, ON_THE_COLLECTION),
+            other => panic!("the collection does not answer PATCH, so 405: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn patching_one_task_still_reaches_the_handler_that_reads_the_identifier() {
+        let service = Arc::new(TaskService::new(NoTasks));
+
+        let refused = tasks(
+            &service,
+            &Offload::new(),
+            addressed(&Method::PATCH, ONE_TASK, NO_BODY),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(refused, Failure::InvalidBody),
+            "an item path reads its body, and this one sent none"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_form_is_answered_with_a_problem_for_every_box_it_left_out() {
+        let service = Arc::new(SignupService::new(AcceptingSignups));
+
+        let refused = signups(
+            &service,
+            &Offload::new(),
+            addressed(&Method::POST, paths::SIGNUPS, AN_EMPTY_FORM),
+        )
+        .await
+        .unwrap_err();
+
+        let problem = refused.to_problem();
+        let Some(fields) = problem.fields else {
+            panic!("an incomplete form answers with a problem for every box it left out");
+        };
+
+        assert_eq!(problem.status, StatusCode::UNPROCESSABLE_ENTITY.as_u16());
+        for member in EXPECTED_FIELDS {
+            assert!(
+                fields.contains_key(member),
+                "{member} was left out and the client needs to be told where to look"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probe_path_answers_a_read_and_refuses_anything_else() {
+        let readiness = Arc::new(HealthService::new(Answering));
+
+        let answered = health(&readiness, &addressed(&Method::GET, paths::HEALTH, NO_BODY))
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::OK);
+
+        for path in [paths::HEALTH, paths::HEALTH_READY] {
+            let refused = health(&readiness, &addressed(&Method::POST, path, NO_BODY))
+                .await
+                .unwrap_err();
+
+            match refused {
+                Failure::MethodNotAllowed { allowed } => assert_eq!(allowed, methods::GET),
+                other => panic!("{path} is a probe, not a write surface: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_readiness_path_reports_the_dependency_answering() {
+        let readiness = Arc::new(HealthService::new(Answering));
+
+        let answered = health(
+            &readiness,
+            &addressed(&Method::GET, paths::HEALTH_READY, NO_BODY),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(answered.status(), StatusCode::OK);
+        assert!(answered.headers().get(headers::ALLOW).is_none());
+    }
+}

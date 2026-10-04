@@ -26,6 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Every commit, not the one being built. The secrets gate reads the
+          # history, and the default depth of one leaves it nothing to read: the
+          # step would pass by having no commits to find a secret in, which is
+          # the quietest way for a gate to stop being a gate.
+          fetch-depth: 0
 
       # Every tool the gate needs, pinned in one place rather than installed
       # three different ways. The image build is cached by the runner's Docker,

@@ -32,17 +32,31 @@ CREATE TABLE IF NOT EXISTS inventory (
 
 -- event_id is the primary key, so a relay that retries an insert cannot create a
 -- second copy of the same event.
+--
+-- quarantined_at holds a row the relay claimed and could not read: a payload
+-- that no longer parses under the type it names. Such a row can never be
+-- delivered, and leaving it pending would put it at the head of every ordered
+-- batch forever, starving every valid event behind it. Setting the column takes
+-- it out of the claim without marking it published, so nothing is acknowledged
+-- that no consumer saw and an operator can clear the column to retry after a
+-- fix.
 CREATE TABLE IF NOT EXISTS outbox (
-  event_id     UUID        PRIMARY KEY,
-  type         TEXT        NOT NULL,
-  payload      JSONB       NOT NULL,
-  occurred_at  TIMESTAMPTZ NOT NULL,
-  published_at TIMESTAMPTZ
+  event_id       UUID        PRIMARY KEY,
+  type           TEXT        NOT NULL,
+  payload        JSONB       NOT NULL,
+  occurred_at    TIMESTAMPTZ NOT NULL,
+  published_at   TIMESTAMPTZ,
+  quarantined_at TIMESTAMPTZ
 );
 
--- The relay reads only undelivered rows, and a partial index keeps that scan
+-- Stated twice on purpose. The CREATE above builds the table on a fresh
+-- database, and this reaches a database created before the column existed, which
+-- CREATE TABLE IF NOT EXISTS silently leaves alone.
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ;
+
+-- The relay reads only deliverable rows, and a partial index keeps that scan
 -- proportional to the backlog rather than to every event the service ever
 -- published.
 CREATE INDEX IF NOT EXISTS outbox_pending
   ON outbox (occurred_at)
-  WHERE published_at IS NULL;
+  WHERE published_at IS NULL AND quarantined_at IS NULL;

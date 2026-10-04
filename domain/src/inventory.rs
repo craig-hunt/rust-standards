@@ -218,14 +218,22 @@ impl InventoryQuery {
             .cloned()
             .collect();
 
-        match self.sort {
-            Column::Name => matched.sort_by(|left, right| left.name.cmp(&right.name)),
-            Column::Quantity => matched.sort_by_key(|item| item.quantity),
-            Column::Status => matched.sort_by(|left, right| left.status.cmp(&right.status)),
-        }
-        if self.direction == Direction::Descending {
-            matched.reverse();
-        }
+        // The comparator carries the direction rather than the sorted vector
+        // being reversed afterwards. Reversing undoes the stability the sort just
+        // provided: rows tied on the sort column come back in the opposite of the
+        // order the store returned them, so a descending sort on status shuffles
+        // every item sharing a status.
+        matched.sort_by(|left, right| {
+            let ordered = match self.sort {
+                Column::Name => left.name.cmp(&right.name),
+                Column::Quantity => left.quantity.cmp(&right.quantity),
+                Column::Status => left.status.cmp(&right.status),
+            };
+            match self.direction {
+                Direction::Ascending => ordered,
+                Direction::Descending => ordered.reverse(),
+            }
+        });
 
         InventoryResult {
             shown: matched.len(),
@@ -235,17 +243,62 @@ impl InventoryQuery {
     }
 }
 
+/// What a fresh database starts with, named rather than written into the list.
+///
+/// The rule covers a seed row as it covers anything else. These were literals
+/// inside a `vec!` until the literal rule learned to read macro tokens, which is
+/// exactly the hiding place a rule about source text leaves open when it trusts
+/// the syntax tree alone.
+mod seeded {
+    pub(super) const ACCESS_BADGE: &str = "Access badge";
+    pub(super) const ACCESS_BADGES_ON_HAND: i32 = 240;
+    pub(super) const DOCKING_STATION: &str = "Docking station";
+    pub(super) const DOCKING_STATIONS_ON_HAND: i32 = 12;
+    pub(super) const LAPTOP_SLEEVE: &str = "Laptop sleeve";
+    pub(super) const LAPTOP_SLEEVES_ON_HAND: i32 = 0;
+    pub(super) const MONITOR_ARM: &str = "Monitor arm";
+    pub(super) const MONITOR_ARMS_ON_HAND: i32 = 58;
+    pub(super) const HEADSET: &str = "Noise-cancelling headset";
+    pub(super) const HEADSETS_ON_HAND: i32 = 4;
+    pub(super) const WEBCAM: &str = "Webcam";
+    pub(super) const WEBCAMS_ON_HAND: i32 = 31;
+}
+
 /// The rows a fresh database starts with, so the reference API answers with
 /// something recognizable before anyone adds stock.
 #[must_use]
 pub fn seed() -> Vec<InventoryItem> {
     vec![
-        row("Access badge", 240, constants::STATUS_IN_STOCK),
-        row("Docking station", 12, constants::STATUS_LOW),
-        row("Laptop sleeve", 0, constants::STATUS_OUT_OF_STOCK),
-        row("Monitor arm", 58, constants::STATUS_IN_STOCK),
-        row("Noise-cancelling headset", 4, constants::STATUS_LOW),
-        row("Webcam", 31, constants::STATUS_IN_STOCK),
+        row(
+            seeded::ACCESS_BADGE,
+            seeded::ACCESS_BADGES_ON_HAND,
+            constants::STATUS_IN_STOCK,
+        ),
+        row(
+            seeded::DOCKING_STATION,
+            seeded::DOCKING_STATIONS_ON_HAND,
+            constants::STATUS_LOW,
+        ),
+        row(
+            seeded::LAPTOP_SLEEVE,
+            seeded::LAPTOP_SLEEVES_ON_HAND,
+            constants::STATUS_OUT_OF_STOCK,
+        ),
+        row(
+            seeded::MONITOR_ARM,
+            seeded::MONITOR_ARMS_ON_HAND,
+            constants::STATUS_IN_STOCK,
+        ),
+        row(
+            seeded::HEADSET,
+            seeded::HEADSETS_ON_HAND,
+            constants::STATUS_LOW,
+        ),
+        row(
+            seeded::WEBCAM,
+            seeded::WEBCAMS_ON_HAND,
+            constants::STATUS_IN_STOCK,
+        ),
     ]
 }
 
@@ -264,7 +317,9 @@ mod tests {
     // cannot reach for any of them.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Column, Direction, InventoryItem, InventoryQuery, Status, constants, seed};
+    use super::{
+        Column, Direction, InventoryItem, InventoryQuery, Status, constants, seed, seeded,
+    };
 
     const ALPHA: &str = "Alpha";
     const BRAVO: &str = "Bravo";
@@ -280,13 +335,20 @@ mod tests {
     const SEARCH_IN_UPPER_CASE: &str = "BADGE";
     const PADDED_SEARCH: &str = "  badge  ";
     const TRIMMED_SEARCH: &str = "badge";
-    const SEEDED_BADGE: &str = "Access badge";
 
     fn rows() -> Vec<InventoryItem> {
         vec![
             item(CHARLIE, FEW, constants::STATUS_LOW),
             item(ALPHA, MANY, constants::STATUS_OUT_OF_STOCK),
             item(BRAVO, SHARED_QUANTITY, constants::STATUS_IN_STOCK),
+        ]
+    }
+
+    /// Two rows the sort cannot separate, in the order a store returned them.
+    fn tied_rows() -> Vec<InventoryItem> {
+        vec![
+            item(CHARLIE, SHARED_QUANTITY, constants::STATUS_LOW),
+            item(ALPHA, SHARED_QUANTITY, constants::STATUS_LOW),
         ]
     }
 
@@ -358,7 +420,28 @@ mod tests {
 
         assert_eq!(matched.shown, ONE_MATCH);
         assert_eq!(matched.total, seed().len());
-        assert_eq!(matched.items[0].name, SEEDED_BADGE);
+        assert_eq!(matched.items[0].name, seeded::ACCESS_BADGE);
+    }
+
+    #[test]
+    fn a_descending_sort_keeps_tied_rows_in_the_order_the_store_returned_them() {
+        let ordered: Vec<String> = InventoryQuery::parse(
+            None,
+            Some(constants::COLUMN_STATUS),
+            Some(constants::DIRECTION_DESCENDING),
+        )
+        .unwrap()
+        .apply(&tied_rows())
+        .items
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+
+        assert_eq!(
+            ordered,
+            vec![CHARLIE, ALPHA],
+            "reversing the sorted vector would answer these the other way round"
+        );
     }
 
     #[test]

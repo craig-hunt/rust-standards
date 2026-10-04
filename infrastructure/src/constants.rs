@@ -76,10 +76,19 @@ pub mod sql {
          ON CONFLICT (name) DO NOTHING";
 
     /// Writes one outbox message.
+    ///
+    /// `$3::text::jsonb` rather than `$3::jsonb`, and the two steps are the whole
+    /// point. PostgreSQL resolves a parameter's type from the cast it sits under,
+    /// so `$3::jsonb` tells the driver to send a Rust `String` as `jsonb`, which
+    /// it will not do: every write of an event failed with a parameter
+    /// serialization error, so no event could reach the table at all. Naming
+    /// `text` first says what the Rust side actually holds, which is the JSON as
+    /// a string, and the second cast is the one the column asks for. The claim
+    /// reads it back the same way round, with `payload::text`.
     pub const INSERT_OUTBOX: &str = "INSERT INTO outbox (event_id, type, payload, occurred_at) \
-         VALUES ($1, $2, $3::jsonb, $4)";
+         VALUES ($1, $2, $3::text::jsonb, $4)";
 
-    /// Claims a batch of undelivered messages.
+    /// Claims a batch of deliverable messages.
     ///
     /// `FOR UPDATE SKIP LOCKED` is the whole point. A second replica running the
     /// same relay takes a different batch rather than the same rows; without it,
@@ -87,13 +96,30 @@ pub mod sql {
     /// twice. At-least-once delivery tolerates a repeat, but that is no reason to
     /// manufacture one on every pass.
     ///
+    /// `payload::text` is not decoration. The column is `jsonb`, the driver
+    /// decodes `jsonb` into a JSON value rather than a string, and the row type
+    /// reads it as a string: without the cast the first claim of the service's
+    /// life panics inside the relay thread.
+    ///
+    /// `type = ANY($2)` passes the wire names this deployment can resolve. A row
+    /// naming anything else is left for a deployment that knows it, and leaving
+    /// it in the claim would put it at the head of every ordered batch, so a
+    /// backlog of fifty unknown events would starve every valid event behind
+    /// them indefinitely.
+    ///
     /// `LIMIT` precedes `FOR UPDATE` because PostgreSQL requires that order.
-    pub const CLAIM_OUTBOX: &str = "SELECT event_id, type, payload, occurred_at FROM outbox \
-         WHERE published_at IS NULL ORDER BY occurred_at LIMIT $1 \
+    pub const CLAIM_OUTBOX: &str = "SELECT event_id, type, payload::text AS payload, occurred_at \
+         FROM outbox \
+         WHERE published_at IS NULL AND quarantined_at IS NULL AND type = ANY($2) \
+         ORDER BY occurred_at LIMIT $1 \
          FOR UPDATE SKIP LOCKED";
 
     /// Marks one message delivered.
     pub const MARK_PUBLISHED: &str = "UPDATE outbox SET published_at = $1 WHERE event_id = $2";
+
+    /// Takes one unreadable message out of the claim without acknowledging it.
+    pub const QUARANTINE_MESSAGE: &str =
+        "UPDATE outbox SET quarantined_at = $1 WHERE event_id = $2";
 
     /// Asks the database to answer something trivial.
     pub const PING: &str = "SELECT 1";
@@ -122,6 +148,9 @@ pub mod messages {
     pub const SCHEMA_MISSING: &str = "the schema script is not compiled into this binary";
     /// A stored message names a type this deployment does not know.
     pub const UNKNOWN_TYPE: &str = "outbox message names a type this deployment cannot resolve";
+    /// A stored message names a known type and carries a body that will not read.
+    pub const UNREADABLE_PAYLOAD: &str =
+        "outbox message quarantined: its body does not read as the type it names";
     /// A relay pass failed.
     pub const RELAY_FAILED: &str = "the outbox relay pass did not complete";
 }

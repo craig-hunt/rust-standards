@@ -23,6 +23,23 @@ mod wire {
     pub(crate) const TASK_COMPLETED: &str = "TaskCompleted";
 }
 
+/// The wire names this deployment can turn back into an event.
+///
+/// Passed to the claim, so a row naming anything else never enters a batch. The
+/// list has to match `from_row` exactly, and a test asserts both directions:
+/// every name here resolves, and every event the domain can raise has its name
+/// here.
+const RESOLVABLE_WIRE_NAMES: [&str; 2] = [wire::SIGNUP_RECORDED, wire::TASK_COMPLETED];
+
+/// The wire names a claim asks for.
+///
+/// Published so a reader and a test can see what the relay will take, rather
+/// than inferring it from a statement.
+#[must_use]
+pub const fn resolvable_wire_names() -> [&'static str; RESOLVABLE_WIRE_NAMES.len()] {
+    RESOLVABLE_WIRE_NAMES
+}
+
 /// The members a stored payload carries.
 mod payload {
     pub(crate) const SIGNUP_ID: &str = "signupId";
@@ -162,12 +179,19 @@ pub fn write(transaction: &mut Transaction<'_>, event: &DomainEvent) -> StoreRes
 
 /// Claims a batch of messages, delivers them, and marks what it delivered.
 ///
-/// A message whose type this deployment cannot resolve stays unpublished.
-/// Marking it would acknowledge something no consumer ever saw, which is the one
-/// outcome the outbox exists to prevent. It waits for a deployment that knows the
-/// type, and a production system would move it aside once a retry budget ran out.
+/// Neither kind of undeliverable message can block the ones behind it, and
+/// neither is acknowledged, because marking a message published would claim a
+/// consumer saw it. They are kept apart because they differ:
 ///
-/// Separate from the relay, so the delivery path has a seam a test can drive
+/// - **A type this deployment cannot resolve** is excluded by the claim itself,
+///   which passes the names this build knows. The row waits, untouched, for a
+///   deployment that knows the type. Nothing about it is wrong.
+/// - **A known type carrying a body that will not read** can never be delivered
+///   by any deployment, so leaving it pending would park it at the head of every
+///   ordered batch. The relay quarantines it, which takes it out of the claim and
+///   leaves it in the table for an operator.
+///
+/// Separate from the relay loop, so the delivery path has a seam a test can drive
 /// without a background thread and a timer.
 pub struct Publisher<D, C> {
     pool: ConnectionPool,
@@ -194,22 +218,30 @@ impl<D: EventDispatcher, C: Clock> Publisher<D, C> {
     pub fn publish_pending(&self) -> StoreResult<usize> {
         persistence::in_transaction(&self.pool, |transaction| {
             let claimed = Self::claim(transaction)?;
-            let published_at = self.clock.now();
+            let now = self.clock.now();
             let mut published = 0;
 
             for row in claimed {
                 let Some(event) = from_row(&row) else {
+                    // The claim passed this deployment's own wire names, so a
+                    // claimed row naming one of them and still failing to read
+                    // carries a body nothing can parse. No later deployment
+                    // improves on that, which is what separates it from an
+                    // unknown type and what makes quarantine the answer.
                     tracing::error!(
                         event_id = %row.event_id,
                         wire_name = %row.wire_name,
                         "{}",
-                        messages::UNKNOWN_TYPE
+                        messages::UNREADABLE_PAYLOAD
                     );
+                    transaction
+                        .execute(sql::QUARANTINE_MESSAGE, &[&now, &row.event_id])
+                        .map_err(|failure| persistence::unavailable(&failure))?;
                     continue;
                 };
                 self.dispatcher.dispatch(&event)?;
                 transaction
-                    .execute(sql::MARK_PUBLISHED, &[&published_at, &row.event_id])
+                    .execute(sql::MARK_PUBLISHED, &[&now, &row.event_id])
                     .map_err(|failure| persistence::unavailable(&failure))?;
                 published += 1;
             }
@@ -219,8 +251,9 @@ impl<D: EventDispatcher, C: Clock> Publisher<D, C> {
     }
 
     fn claim(transaction: &mut Transaction<'_>) -> StoreResult<Vec<StoredEvent>> {
+        let resolvable = RESOLVABLE_WIRE_NAMES.to_vec();
         let rows = transaction
-            .query(sql::CLAIM_OUTBOX, &[&OUTBOX_BATCH_SIZE])
+            .query(sql::CLAIM_OUTBOX, &[&OUTBOX_BATCH_SIZE, &resolvable])
             .map_err(|failure| persistence::unavailable(&failure))?;
 
         Ok(rows
@@ -232,5 +265,114 @@ impl<D: EventDispatcher, C: Clock> Publisher<D, C> {
                 occurred_at: row.get(columns::OCCURRED_AT),
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // A test asserts by panicking, so the lints that forbid a panic in a service
+    // have to be lifted here.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{StoredEvent, from_row, resolvable_wire_names, to_row, wire};
+    use domain::events::DomainEvent;
+    use std::time::SystemTime;
+    use uuid::Uuid;
+
+    const SIGNUP_ID: i64 = 7;
+    const TASK_ID: i64 = 4;
+    const EMAIL: &str = "ada@example.com";
+    const PLAN: &str = "Team";
+    const SEATS: i32 = 12;
+    const TITLE: &str = "Read the ADR";
+    const RETIRED_WIRE_NAME: &str = "AccountClosed";
+    const NOT_JSON: &str = "{";
+    const JSON_MISSING_THE_MEMBERS: &str = "{}";
+
+    fn a_signup() -> DomainEvent {
+        DomainEvent::SignupRecorded {
+            event_id: Uuid::new_v4(),
+            occurred_at: SystemTime::now(),
+            signup_id: SIGNUP_ID,
+            email: EMAIL.to_owned(),
+            plan: PLAN.to_owned(),
+            seats: SEATS,
+        }
+    }
+
+    fn a_completion() -> DomainEvent {
+        DomainEvent::TaskCompleted {
+            event_id: Uuid::new_v4(),
+            occurred_at: SystemTime::now(),
+            task_id: TASK_ID,
+            title: TITLE.to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_event_survives_the_round_trip_through_a_row() {
+        for event in [a_signup(), a_completion()] {
+            let row = to_row(&event).unwrap();
+
+            assert_eq!(
+                from_row(&row),
+                Some(event),
+                "a stored event has to read back as what was written, member for member"
+            );
+        }
+    }
+
+    #[test]
+    fn the_claim_asks_for_exactly_the_names_this_build_resolves() {
+        let written: Vec<String> = [a_signup(), a_completion()]
+            .iter()
+            .map(|event| to_row(event).unwrap().wire_name)
+            .collect();
+
+        for name in resolvable_wire_names() {
+            assert!(
+                written.contains(&name.to_owned()),
+                "{name} is claimed and nothing writes it, so the claim asks for a name from_row cannot resolve"
+            );
+        }
+        for name in &written {
+            assert!(
+                resolvable_wire_names().contains(&name.as_str()),
+                "{name} is written and never claimed, so those events would sit pending forever"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_this_deployment_retired_resolves_to_nothing() {
+        let row = StoredEvent {
+            event_id: Uuid::new_v4(),
+            wire_name: RETIRED_WIRE_NAME.to_owned(),
+            payload: JSON_MISSING_THE_MEMBERS.to_owned(),
+            occurred_at: SystemTime::now(),
+        };
+
+        assert!(from_row(&row).is_none());
+        assert!(
+            !resolvable_wire_names().contains(&RETIRED_WIRE_NAME),
+            "the claim must leave a name this build cannot resolve alone"
+        );
+    }
+
+    #[test]
+    fn a_known_name_carrying_an_unreadable_body_resolves_to_nothing() {
+        for body in [NOT_JSON, JSON_MISSING_THE_MEMBERS] {
+            let row = StoredEvent {
+                event_id: Uuid::new_v4(),
+                wire_name: wire::TASK_COMPLETED.to_owned(),
+                payload: body.to_owned(),
+                occurred_at: SystemTime::now(),
+            };
+
+            assert!(
+                from_row(&row).is_none(),
+                "the relay quarantines what it cannot read, and this is how it finds out"
+            );
+        }
     }
 }
