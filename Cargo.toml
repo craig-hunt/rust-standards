@@ -1,0 +1,100 @@
+# The workspace, and the only place a version or a lint level is written.
+#
+# Cargo gives this repository something its Go, C# and Java siblings have to
+# assert with a test: a crate cannot depend on a crate that does not list it,
+# and Cargo refuses a dependency cycle outright. The layer boundary below is
+# therefore a compile error rather than a convention, which is the strongest
+# form any of the four siblings manages.
+[workspace]
+resolver = "3"
+members = ["domain", "application", "infrastructure", "web", "conventions"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.0"
+license = "MIT"
+repository = "https://github.com/craig-hunt/rust-standards"
+
+# Every version lives here and nowhere else, the way Directory.Packages.props
+# does in the C# sibling and the parent POM does in the Java one. A crate that
+# pinned its own version would let two crates disagree about one dependency with
+# nothing to say so.
+[workspace.dependencies]
+# The crates this workspace builds, declared here with both a path and a version
+# so the dependency direction reads the same in every manifest and a version
+# appears exactly once. A bare path dependency is a wildcard, which the audit
+# refuses: a build that accepts any version of something accepts a version
+# nobody reviewed.
+domain = { path = "domain", version = "0.1.0" }
+application = { path = "application", version = "0.1.0" }
+infrastructure = { path = "infrastructure", version = "0.1.0" }
+
+thiserror = "2.0.21"
+
+# The domain takes this one, which is the documented divergence from the Go, C#
+# and Java siblings: all three get a UUID type from their standard library and
+# Rust does not. It is a value type that reaches nothing, so the rule the domain
+# holds to, that it depends on no clock and no client, still holds.
+uuid = { version = "1.27.0", features = ["v4"] }
+
+# The conventions crate reads this repository's own source and manifests. These
+# are the only dependencies in the workspace that exist to enforce a rule rather
+# than to serve a request.
+syn = { version = "3.0.6", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+walkdir = "2.5.0"
+toml = "1.1.6"
+
+# Infrastructure. The blocking PostgreSQL client rather than the async one,
+# because the ports are blocking and an async store would have to block on a
+# runtime to satisfy them, which is the deadlock every such wrapper warns about.
+# with-uuid-1 so an event identifier crosses to a uuid column without a
+# conversion somebody writes by hand twice.
+postgres = { version = "0.19.14", features = ["with-uuid-1"] }
+r2d2 = "0.8.10"
+r2d2_postgres = "0.18.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tracing = "0.1.44"
+
+# The edge. hyper rather than a framework, for the reason the README records:
+# Go and Java could decline a framework because their platforms ship a server,
+# Rust ships none, and hyper is the closest thing to the platform here.
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "net", "macros", "signal"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[workspace.lints.rust]
+# Go has nothing to say here and Rust must. Forbid rather than deny: deny can be
+# lifted by an inner allow attribute, and forbid cannot, so an exemption has to
+# be argued for in this file where a reviewer sees it.
+unsafe_code = "forbid"
+
+# A warning that does not fail the build is a warning nobody reads. This is the
+# same position the C# sibling takes with TreatWarningsAsErrors and the Java one
+# with -Werror.
+warnings = "deny"
+missing_docs = "deny"
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+
+[workspace.lints.clippy]
+# priority -1 so a specific lint below can override the group it belongs to.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+# A panic in a service is a request that dies without an answer and a process
+# that may take its neighbours with it. Failures travel as Result, which is the
+# Rust shape of the Go sibling's rule that errors return rather than throw.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Rejected deliberately. An integer cast that silently truncates is a defect
+# this codebase should not be able to write.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"

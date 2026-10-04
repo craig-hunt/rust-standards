@@ -1,0 +1,10 @@
+# Build output
+target/
+
+# Mutation testing reports
+mutants.out/
+mutants.out.old/
+
+# Editors
+.idea/
+.vscode/

@@ -1,0 +1,46 @@
+# The whole stack on one command. The migrator runs to completion before the API
+# starts, so the API never migrates at startup and never races a second replica
+# doing the same thing.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: standards
+      POSTGRES_USER: standards
+      # Local development only. A deployed environment supplies its own.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-standards}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U standards -d standards"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "5432:5432"
+
+  migrator:
+    build:
+      context: .
+      target: migrator
+    environment:
+      DATABASE_URL: postgresql://standards:${POSTGRES_PASSWORD:-standards}@db:5432/standards
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      DATABASE_URL: postgresql://standards:${POSTGRES_PASSWORD:-standards}@db:5432/standards
+      PORT: 8080
+      # Local development only, and overridable. The service refuses to start
+      # without it, so an empty placeholder can never leave the token check
+      # accepting every caller.
+      API_TOKEN: ${API_TOKEN:-local-development-token}
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
