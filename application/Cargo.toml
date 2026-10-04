@@ -1,0 +1,23 @@
+# What the service does, and the ports it needs somebody else to implement.
+#
+# Depends on domain and on no framework. A service that imported a web framework
+# to describe what it does would make its own rule untestable without that
+# framework, and would invite the framework's types into signatures the domain
+# reads.
+[package]
+name = "application"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+domain.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[lints]
+workspace = true

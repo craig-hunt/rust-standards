@@ -1,0 +1,20 @@
+# The innermost crate, depending on a derive macro and an identifier type.
+#
+# It has no runtime, no client, no clock. A domain that can reach a database is
+# a domain whose rules a test cannot pin down, and the dependency list is the
+# only place that claim can be checked cheaply. The conventions crate asserts
+# the list stays this short.
+[package]
+name = "domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,48 @@
+name: verify
+
+# The gate that protects a merge. It runs the same script a developer runs, so a
+# pull request cannot pass a check the local command does not make, and a local
+# run cannot pass a check CI then fails.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # One run per branch, newest wins. A superseded push has nothing left to prove.
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only, and the job needs nothing else. This repository is public, so a
+# workflow running with a writable token on a fork's pull request would hand that
+# token to code the fork controls.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Every commit, not the one being built. The secrets gate reads the
+          # history, and the default depth of one leaves it nothing to read: the
+          # step would pass by having no commits to find a secret in, which is
+          # the quietest way for a gate to stop being a gate.
+          fetch-depth: 0
+
+      # Every tool the gate needs, pinned in one place rather than installed
+      # three different ways. The image build is cached by the runner's Docker,
+      # and running the same script CI and a developer both run means neither can
+      # pass a check the other does not make.
+      #
+      # Invoked through bash rather than as a program, and not as a matter of
+      # taste: this repository is developed on a filesystem that cannot record an
+      # executable bit, so git stores these scripts mode 644 and a checkout that
+      # runs one directly exits 126 before a single gate has run. Naming the
+      # interpreter removes a class of failure that has nothing to do with the
+      # code under test.
+      - name: Every gate
+        run: bash ./scripts/verify-in-docker.sh

@@ -1,0 +1,25 @@
+# The crate that makes the conventions executable.
+#
+# Its tests assert the rules the README states: that no literal with a meaning
+# sits loose in a function body, that each crate's dependency list stays what it
+# claims, and that no module is named for a category instead of a job.
+#
+# A rule stated only in a README is a rule nobody enforces. These fail the build
+# instead.
+[package]
+name = "conventions"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+proc-macro2.workspace = true
+syn.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,41 @@
+# The HTTP edge, and the only crate that knows a request exists.
+#
+# It declares no web framework. hyper is the closest thing Rust has to the
+# platform's own server, which is the position the Go sibling takes with net/http
+# and the Java one with jdk.httpserver. The README records why: a framework would
+# supply its own opinions about routing, binding and error mapping, and those
+# opinions are what this repository exists to state for itself.
+[package]
+name = "web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "api"
+path = "src/bin/api.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+infrastructure.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

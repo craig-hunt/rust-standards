@@ -1,0 +1,11 @@
+# The toolchain, stated rather than assumed.
+#
+# rustup reads this and installs exactly this version, so a build on a laptop
+# with an older toolchain does not produce a different answer from CI. Pinning a
+# version rather than a channel means a new stable release is a visible change
+# to this file, reviewed like any other, rather than a Tuesday on which the
+# lints changed.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

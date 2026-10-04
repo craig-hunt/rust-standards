@@ -1,0 +1,43 @@
+# What the dependency audit refuses.
+#
+# A known vulnerability fails the build. The alternative, reporting one and
+# carrying on, produces a list nobody reads and a dependency nobody updates.
+#
+# cargo-deny rather than cargo-audit alone, because the same pass also answers
+# the license question and the duplicate question, and three tools reading one
+# lockfile is three chances for them to disagree about what is in it.
+
+[advisories]
+# Anything with an advisory stops the build. An unmaintained crate is a warning
+# rather than a failure: it is a reason to plan a replacement, not a reason
+# nobody can land anything today.
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+# Permissive only, and stated rather than discovered. A copyleft dependency is a
+# decision somebody has to make on purpose, so the build refuses one until this
+# list says otherwise.
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate in a build means two copies of its state. Warned
+# rather than denied, because a transitive duplicate is usually somebody else's
+# release cadence rather than this repository's mistake.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Crates come from the registry, never from a git revision somebody can move.
+unknown-registry = "deny"
+unknown-git = "deny"
